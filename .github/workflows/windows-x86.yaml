@@ -168,6 +168,7 @@ jobs:
 
           git add .
 
+
           git commit -m "upload $dst_dir.tar.bz2"
           git push https://csukuangfj:$HF_TOKEN@huggingface.co/csukuangfj/onnxruntime-libs main
           cd ..
