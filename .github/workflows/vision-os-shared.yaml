@@ -1,0 +1,143 @@
+name: vision_os-shared
+
+on:
+  push:
+    branches:
+      - vos
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version information (e.g., 1.19.2)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  ONNXRUNTIME_VERSION:
+    |- # Enter release tag name or version name in workflow_dispatch. Appropriate version if not specified
+    ${{ github.event.release.tag_name || github.event.inputs.version || '1.19.2' }}
+
+jobs:
+  vision_os-shared:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest]
+
+    steps:
+      - name: Cache build result for ${{ env.ONNXRUNTIME_VERSION }}
+        id: cache-build-result
+        uses: actions/cache@v2
+        with:
+          path: onnxruntime-vision_os-{{ env.ONNXRUNTIME_VERSION }}
+          key: onnxruntime-vision_os-{{ env.ONNXRUNTIME_VERSION }}-cache-v1
+
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ${{ matrix.os }}-vision_os
+
+      - name: Checkout v${{ env.ONNXRUNTIME_VERSION }}
+        if: steps.cache-build-result.outputs.cache-hit != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: microsoft/onnxruntime
+          submodules: true
+          ref: v${{ env.ONNXRUNTIME_VERSION }}
+
+      - name: Install dependencies on macos
+        if: steps.cache-build-result.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          brew install cmake ninja
+          cmake --version
+          brew install tree
+          tree --version
+
+      - name: Build onnxruntime ${{ env.ONNXRUNTIME_VERSION }} for macOS ${{ matrix.arch }}
+        if: steps.cache-build-result.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          export CMAKE_CXX_COMPILER_LAUNCHER=ccache
+          export PATH="/usr/lib/ccache:/usr/local/opt/ccache/libexec:$PATH"
+          cmake --version
+          python3 tools/ci_build/github/apple/build_apple_framework.py \
+            --config Release \
+            tools/ci_build/github/apple/default_vision_os_framework_build_settings.json
+
+      - name: Collect results
+        if: steps.cache-build-result.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          version=${{ env.ONNXRUNTIME_VERSION }}
+
+          for a in xros xrsimulator; do
+            ls -lh build/apple_framework/intermediates/${a}_arm64/Release/Release-$a/onnxruntime.framework
+
+            artifact=onnxruntime-vision_os-${a}_arm64-$version
+            mkdir -p $artifact//onnxruntime.framework
+            cp -a build/apple_framework/intermediates/${a}_arm64/Release/Release-$a/onnxruntime.framework/* $artifact/onnxruntime.framework/
+            pushd $artifact/onnxruntime.framework/
+            ln -s onnxruntime libonnxruntime.dylib
+            popd
+            tree ./$artifact
+            zip -r ${artifact}.zip ./$artifact
+          done
+
+      - name: Upload artifact xros
+        if: steps.cache-build-result.outputs.cache-hit != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: onnxruntime-vision_os-xros_arm64-${{ env.ONNXRUNTIME_VERSION }}
+          path: onnxruntime-vision_os-xros_arm64-${{ env.ONNXRUNTIME_VERSION }}
+
+      - name: Upload artifact xrsimulator
+        if: steps.cache-build-result.outputs.cache-hit != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: onnxruntime-vision_os-xrsimulator_arm64-${{ env.ONNXRUNTIME_VERSION }}
+          path: onnxruntime-vision_os-xrsimulator_arm64-${{ env.ONNXRUNTIME_VERSION }}
+
+      - name: Upload v${{ env.ONNXRUNTIME_VERSION }}
+        if: steps.cache-build-result.outputs.cache-hit != 'true'
+        uses: svenstaro/upload-release-action@v2
+        with:
+          file_glob: true
+          file: "./*.zip"
+          overwrite: true
+          tag: v${{ env.ONNXRUNTIME_VERSION }}
+
+      # https://huggingface.co/docs/hub/spaces-github-actions
+      - name: Publish to huggingface
+        if: github.repository_owner == 'csukuangfj' && steps.cache-build-result.outputs.cache-hit != 'true'
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        uses: nick-fields/retry@v3
+        with:
+          max_attempts: 20
+          timeout_seconds: 200
+          shell: bash
+          command: |
+            rm -rf huggingface
+
+            ls -lh
+            version=${{ env.ONNXRUNTIME_VERSION }}
+
+            git config --global user.email "csukuangfj@gmail.com"
+            git config --global user.name "Fangjun Kuang"
+
+            export GIT_CLONE_PROTECTION_ACTIVE=false
+            GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/csukuangfj/onnxruntime-libs huggingface
+
+            cd huggingface
+            cp -v ../onnxruntime-vision_os*.zip ./
+            git status
+            git lfs track "*.zip"
+
+            git add .
+
+            git commit -m "upload vision_os"
+            git push https://csukuangfj:$HF_TOKEN@huggingface.co/csukuangfj/onnxruntime-libs main
